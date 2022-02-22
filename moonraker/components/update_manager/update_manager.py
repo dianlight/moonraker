@@ -88,9 +88,9 @@ class UpdateManager:
             self.updaters['system'] = PackageDeploy(config, self.cmd_helper)
         db: DBComp = self.server.lookup_component('database')
         kpath = db.get_item("moonraker", "update_manager.klipper_path",
-                            KLIPPER_DEFAULT_PATH)
+                            KLIPPER_DEFAULT_PATH).result()
         kenv_path = db.get_item("moonraker", "update_manager.klipper_exec",
-                                KLIPPER_DEFAULT_EXEC)
+                                KLIPPER_DEFAULT_EXEC).result()
         if (
             os.path.exists(kpath) and
             os.path.exists(kenv_path)
@@ -140,14 +140,6 @@ class UpdateManager:
                 raise config.error(
                     f"Invalid type '{client_type}' for section [{section}]")
 
-        # Prune stale data from the database
-        umdb = self.cmd_helper.get_umdb()
-        db_keys = umdb.keys()
-        for key in db_keys:
-            if key not in self.updaters:
-                logging.info(f"Removing stale update_manager data: {key}")
-                umdb.pop(key, None)
-
         self.cmd_request_lock = asyncio.Lock()
         self.klippy_identified_evt: Optional[asyncio.Event] = None
 
@@ -186,10 +178,17 @@ class UpdateManager:
             "server:klippy_identified", self._set_klipper_repo)
 
     async def component_init(self) -> None:
+        # Prune stale data from the database
+        umdb = self.cmd_helper.get_umdb()
+        db_keys = await umdb.keys()
+        for key in db_keys:
+            if key not in self.updaters:
+                logging.info(f"Removing stale update_manager data: {key}")
+                await umdb.pop(key, None)
+
         async with self.cmd_request_lock:
             for updater in list(self.updaters.values()):
-                if isinstance(updater, PackageDeploy):
-                    await updater.initialize()
+                await updater.initialize()
                 if updater.needs_refresh():
                     await updater.refresh()
         if self.refresh_timer is not None:
@@ -224,6 +223,9 @@ class UpdateManager:
                 'executable': executable
             })
         async with self.cmd_request_lock:
+            umdb = self.cmd_helper.get_umdb()
+            await umdb.pop('klipper', None)
+            await self.updaters['klipper'].initialize()
             await self.updaters['klipper'].refresh()
         if need_notification:
             vinfo: Dict[str, Any] = {}
@@ -789,11 +791,12 @@ class PackageDeploy(BaseDeploy):
                  ) -> None:
         super().__init__(config, cmd_helper, "system", "", "")
         cmd_helper.set_package_updater(self)
-        storage = self._load_storage()
         self.use_packagekit = config.getboolean("enable_packagekit", True)
-        self.available_packages: List[str] = storage.get('packages', [])
+        self.available_packages: List[str] = []
 
-    async def initialize(self) -> None:
+    async def initialize(self) -> Dict[str, Any]:
+        storage = await super().initialize()
+        self.available_packages = storage.get('packages', [])
         provider: BasePackageProvider
         try_fallback = True
         if self.use_packagekit:
@@ -820,6 +823,7 @@ class PackageDeploy(BaseDeploy):
                 logging.info("PackageDeploy: Using APT CLI Provider")
                 provider = fallback
         self.provider = provider
+        return storage
 
     async def _get_fallback_provider(self) -> Optional[BasePackageProvider]:
         # Currently only the API Fallback provider is available
@@ -1289,6 +1293,7 @@ class WebClientDeploy(BaseDeploy):
         self.path = pathlib.Path(config.get("path")).expanduser().resolve()
         self.type = config.get('type')
         self.channel = "stable" if self.type == "web" else "beta"
+        self.info_tags: List[str] = config.getlist("info_tags", [])
         self.persistent_files: List[str] = []
         pfiles = config.getlist('persistent_files', None)
         if pfiles is not None:
@@ -1297,7 +1302,9 @@ class WebClientDeploy(BaseDeploy):
                 raise config.error(
                     "Invalid value for option 'persistent_files': "
                     "'.version' can not be persistent")
-        storage = self._load_storage()
+
+    async def initialize(self) -> Dict[str, Any]:
+        storage = await super().initialize()
         self.version: str = storage.get('version', "?")
         self.remote_version: str = storage.get('remote_version', "?")
         dl_info: List[Any] = storage.get('dl_info', ["?", "?", 0])
@@ -1306,6 +1313,7 @@ class WebClientDeploy(BaseDeploy):
         logging.info(f"\nInitializing Client Updater: '{self.name}',"
                      f"\nChannel: {self.channel}"
                      f"\npath: {self.path}")
+        return storage
 
     async def _get_local_version(self) -> None:
         version_path = self.path.joinpath(".version")
@@ -1436,7 +1444,8 @@ class WebClientDeploy(BaseDeploy):
             'version': self.version,
             'remote_version': self.remote_version,
             'configured_type': self.type,
-            'channel': self.channel
+            'channel': self.channel,
+            'info_tags': self.info_tags
         }
 
 def load_component(config: ConfigHelper) -> UpdateManager:

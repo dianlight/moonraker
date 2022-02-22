@@ -8,9 +8,11 @@ from __future__ import annotations
 import configparser
 import os
 import hashlib
+import shutil
+import filecmp
+import pathlib
+import logging
 from utils import SentinelClass
-from components.gpio import GpioOutputPin
-from components.template import JinjaTemplate
 
 # Annotation imports
 from typing import (
@@ -28,10 +30,10 @@ from typing import (
 )
 if TYPE_CHECKING:
     from moonraker import Server
-    from components.gpio import GpioFactory
-    from components.template import TemplateFactory
+    from components.gpio import GpioFactory, GpioOutputPin
+    from components.template import TemplateFactory, JinjaTemplate
     _T = TypeVar("_T")
-    ConfigVal = Union[None, int, float, bool, str]
+    ConfigVal = Union[None, int, float, bool, str, dict, list]
 
 SENTINEL = SentinelClass.get_instance()
 
@@ -78,8 +80,9 @@ class ConfigHelper:
 
     def get_hash(self) -> hashlib._Hash:
         hash = hashlib.sha256()
-        for option in self.config[self.section]:
+        for option, val in self.config[self.section].items():
             hash.update(option.encode())
+            hash.update(val.encode())
         return hash
 
     def get_prefix_sections(self, prefix: str) -> List[str]:
@@ -122,10 +125,14 @@ class ConfigHelper:
             self._check_option(option, val, above, below, minval, maxval)
         if self.section in self.orig_sections:
             # Only track sections included in the original config
-            if isinstance(val, (GpioOutputPin, JinjaTemplate)):
-                self.parsed[self.section][option] = str(val)
-            else:
+            if (
+                val is None or
+                isinstance(val, (int, float, bool, str, dict, list))
+            ):
                 self.parsed[self.section][option] = val
+            else:
+                # If the item cannot be encoded to json serialize to a string
+                self.parsed[self.section][option] = str(val)
         return val
 
     def _check_option(self,
@@ -371,7 +378,7 @@ class ConfigHelper:
                 f"Configuration File Not Found: '{cfg_file_path}''")
         try:
             sup_cfg = configparser.ConfigParser(interpolation=None)
-            sup_cfg.read(cfg_file_path)
+            sup_cfg.read_file(open(cfg_file_path))
         except Exception:
             raise ConfigError(f"Error Reading Config: '{cfg_file_path}'")
         sections = sup_cfg.sections()
@@ -409,7 +416,7 @@ def get_configuration(server: Server,
         app_args['config_file']))
     config = configparser.ConfigParser(interpolation=None)
     try:
-        config.read(cfg_file_path)
+        config.read_file(open(cfg_file_path))
     except Exception as e:
         if not os.path.isfile(cfg_file_path):
             raise ConfigError(
@@ -423,3 +430,22 @@ def get_configuration(server: Server,
         raise ConfigError("No section [server] in config")
     orig_sections = config.sections()
     return ConfigHelper(server, config, 'server', orig_sections)
+
+def backup_config(cfg_path: str) -> None:
+    cfg = pathlib.Path(cfg_path).expanduser().resolve()
+    backup = cfg.parent.joinpath(f".{cfg.name}.bkp")
+    try:
+        if backup.exists() and filecmp.cmp(cfg, backup):
+            # Backup already exists and is current
+            return
+        shutil.copy2(cfg, backup)
+        logging.info(f"Backing up last working configuration to '{backup}'")
+    except Exception:
+        logging.exception("Failed to create a backup")
+
+def find_config_backup(cfg_path: str) -> Optional[str]:
+    cfg = pathlib.Path(cfg_path).expanduser().resolve()
+    backup = cfg.parent.joinpath(f".{cfg.name}.bkp")
+    if backup.is_file():
+        return str(backup)
+    return None
