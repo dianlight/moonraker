@@ -75,7 +75,17 @@ enable_object_processing: False
 #   The default is False.
 ```
 
-!!! Note
+!!! Warning
+    Moonraker currently supports two paths with read/write access, the
+    `config_path` configured in the `file_manager` and the `virtual_sdcard` path
+    configured through Klipper in `printer.cfg`. These paths are monitored for
+    changes, thus they must not overlap. Likewise, these paths may not be a
+    parent or child of folders containing sensitive files such as the `database`,
+    Moonraker's source, or Klipper's source.  If either of the above conditions
+    are present Moonraker will generate a warning and revoke access to the
+    offending path.
+
+!!! Tip
     It is also possible to enable object processing directly in the slicer.
     See the [preprocess-cancellation](https://github.com/kageurufu/cancelobject-preprocessor)
     documentation for details.
@@ -109,6 +119,23 @@ provider: systemd_dbus
     Alternatively it may be possible to enable the `systemd-logind` service,
     consult with your distro's documentation.
 
+#### Reboot / Shutdown from Klipper
+
+It is possible to call the `shutdown_machine` and `reboot_machine`
+remote methods from a gcode macro in Klipper.  For example:
+
+```ini
+# printer.cfg
+
+[gcode_macro SHUTDOWN]
+gcode:
+  {action_call_remote_method("shutdown_machine")}
+
+[gcode_macro REBOOT]
+gcode:
+  {action_call_remote_method("reboot_machine")}
+```
+
 ### `[database]`
 
 The `database` section provides configuration for Moonraker's lmdb database.
@@ -123,9 +150,13 @@ database_path: ~/.moonraker_database
 #   Moonraker (such as the "config_path" or the location where gcode
 #   files are stored).  If the folder does not exist an attempt will be made
 #   to create it.  The default is ~/.moonraker_database.
-enable_database_debug: False
-#   For developer use only.  End users should leave this option set to False.
 ```
+
+!!! Note
+    Previously the `enable_database_debug` option was available for internal
+    development to test changes to write protected namespaces.  This option
+    been deprecated and disabled.
+
 ### `[data_store]`
 
 The `data_store` section provides configuration for Moonraker's volatile
@@ -231,9 +262,9 @@ force_logins: False
 ```
 
 ### `[octoprint_compat]`
-Enables partial support of Octoprint API is implemented with the purpose of
+Enables partial support of OctoPrint API is implemented with the purpose of
 allowing uploading of sliced prints to a moonraker instance.
-Currently we support Slic3r derivatives and Cura with Cura-Octoprint.
+Currently we support Slic3r derivatives and Cura with Cura-OctoPrint.
 
 ```ini
 # moonraker.conf
@@ -255,7 +286,7 @@ rotate_90: False
 stream_url: /webcam/?action=stream
 #   The URL to use for streaming the webcam.  It can be set to an absolute
 #   URL if needed. In order to get the webcam to work in Cura through
-#   an Octoprint connection, you can set this value to
+#   an OctoPrint connection, you can set this value to
 #   http://<octoprint ip>/webcam/?action=stream.  The default value is
 #   /webcam/?action=stream.
 webcam_enabled: True
@@ -368,11 +399,12 @@ locked_while_printing: False
 #   printer is printing. This is useful to avert an accidental shutdown to
 #   the printer's power.  The default is False.
 restart_klipper_when_powered: False
-#   If set to True, Moonraker will issue a "FIRMWARE_RESTART" to Klipper
-#   after the device has been powered on.  Note: If it isn't possible to
+#   If set to True, Moonraker will schedule a "FIRMWARE_RESTART" to command
+#   after the device has been powered on. If it isn't possible to immediately
 #   schedule a firmware restart (ie: Klippy is disconnected), the restart
 #   will be postponed until Klippy reconnects and reports that startup is
-#   complete.  In this scenario, if Klippy reports that it is "ready", the
+#   complete.  Prior to scheduling the restart command the power device will
+#   always check Klippy's state.  If Klippy reports that it is "ready", the
 #   FIRMWARE_RESTART will be aborted as unnecessary.
 #   The default is False.
 restart_delay: 1.
@@ -1620,7 +1652,7 @@ Example json file:
         "username": "mqtt_user",
         "password": "my_mqtt_password"
     },
-    "home_assistant" {
+    "home_assistant": {
       "token": "long_token_string"
     }
 }
@@ -1650,6 +1682,15 @@ username: {secrets.mqtt_credentials.username}
 password: {secrets.mqtt_credentials.password}
 enable_moonraker_api: True
 ```
+
+!!! warning
+    The purpose of the `[secrets]` module is to keep credentials and
+    other sensitive information out of configuration files and Moonraker's
+    log.  These items are stored in plain text, it is wise to use
+    unique credentials. Never leave a Moonraker client application open
+    unattended in an untrusted location, as it would be possible for a
+    malicious actor to reconfigure moonraker to send items stored in the
+    secrets file to themselves via `mqtt`, `notifer`, etc.
 
 Home Assistant Switch Example:
 
@@ -1685,7 +1726,7 @@ events: *
 #   You can use multiple events, comma seperated.
 #   Valid events:
 #      started
-#      completed
+#      complete
 #      error
 #      cancelled
 body: "Your printer status has changed to {event_name}"
