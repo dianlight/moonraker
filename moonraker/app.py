@@ -11,6 +11,7 @@ import logging
 import json
 import traceback
 import ssl
+import pathlib
 import urllib.parse
 import tornado
 import tornado.iostream
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from confighelper import ConfigHelper
     from klippy_connection import KlippyConnection as Klippy
     from components.file_manager.file_manager import FileManager
+    from components.announcements import Announcements
     from io import BufferedReader
     import components.authorization
     MessageDelgate = Optional[tornado.httputil.HTTPMessageDelegate]
@@ -160,7 +162,7 @@ class InternalTransport(APITransport):
         # Request arguments can be suppplied either through a dict object
         # or via keyword arugments
         args = request_arguments or kwargs
-        return await func(WebRequest(ep, args, action))
+        return await func(WebRequest(ep, dict(args), action))
 
 class MoonrakerApp:
     def __init__(self, config: ConfigHelper) -> None:
@@ -198,15 +200,18 @@ class MoonrakerApp:
             'server': self.server,
             'default_handler_class': AuthorizedErrorHandler,
             'default_handler_args': {},
-            'log_function': self.log_request
+            'log_function': self.log_request,
+            'compiled_template_cache': False,
         }
 
         # Set up HTTP only requests
         self.mutable_router = MutableRouter(self)
         app_handlers: List[Any] = [
             (AnyMatches(), self.mutable_router),
+            (r"/", WelcomeHandler),
             (r"/websocket", WebSocket),
-            (r"/server/redirect", RedirectHandler)]
+            (r"/server/redirect", RedirectHandler)
+        ]
         self.app = tornado.web.Application(app_handlers, **app_args)
         self.get_handler_delegate = self.app.get_handler_delegate
 
@@ -932,3 +937,86 @@ class RedirectHandler(AuthorizedRequestHandler):
             raise tornado.web.HTTPError(
                 400, f"Unauthorized URL redirect: {url}")
         self.redirect(url)
+
+class WelcomeHandler(tornado.web.RequestHandler):
+    def initialize(self) -> None:
+        self.server: Server = self.settings['server']
+
+    async def get(self) -> None:
+        summary: List[str] = []
+        auth: AuthComp = self.server.lookup_component("authorization", None)
+        if auth is not None:
+            try:
+                user = auth.check_authorized(self.request)
+            except tornado.web.HTTPError:
+                authorized = False
+            else:
+                authorized = True
+            if authorized:
+                summary.append(
+                    "Your device is authorized to access Moonraker's API."
+                )
+            else:
+                summary.append(
+                    "Your device is not authorized to access Moonraker's API. "
+                    "This is normal if you intend to use API Key "
+                    "authentication or log in as an authenticated user.  "
+                    "Otherwise you need to add your IP address to the "
+                    "'trusted_clients' option in the [authorization] section "
+                    "of moonraker.conf."
+                )
+            cors_enabled = auth.cors_enabled()
+            if cors_enabled:
+                summary.append(
+                    "CORS is enabled.  Cross origin requests will be allowed "
+                    "for origins that match one of the patterns specified in "
+                    "the 'cors_domain' option of the [authorization] section."
+                )
+            else:
+                summary.append(
+                    "All cross origin requests will be blocked by the browser. "
+                    "The 'cors_domains' option in [authorization] must be  "
+                    "configured to enable CORS."
+                )
+        else:
+            authorized = True
+            cors_enabled = False
+            summary.append(
+                "The [authorization] component is not enabled in "
+                "moonraker.conf.  All connections will be considered trusted."
+            )
+            summary.append(
+                "All cross origin requests will be blocked by the browser.  "
+                "The [authorization] section in moonraker.conf must be "
+                "configured to enable CORS."
+            )
+        kstate = self.server.get_klippy_state()
+        if kstate != "disconnected":
+            kinfo = self.server.get_klippy_info()
+            kmsg = kinfo.get("state_message", kstate)
+            summary.append(f"Klipper reports {kmsg.lower()}")
+        else:
+            summary.append(
+                "Moonraker is not currently connected to Klipper.  Make sure "
+                "that the klipper service has successfully started and that "
+                "its unix is enabled."
+            )
+        ancomp: Announcements
+        ancomp = self.server.lookup_component("announcements")
+        wsm: WebsocketManager = self.server.lookup_component("websockets")
+        context: Dict[str, Any] = {
+            "ip_address": self.request.remote_ip,
+            "authorized": authorized,
+            "cors_enabled": cors_enabled,
+            "version": self.server.get_app_args()["software_version"],
+            "ws_count": wsm.get_count(),
+            "klippy_state": kstate,
+            "warnings": self.server.get_warnings(),
+            "summary": summary,
+            "announcements": await ancomp.get_announcements()
+        }
+        self.render("welcome.html", **context)
+
+    def get_template_path(self) -> Optional[str]:
+        tpath = pathlib.Path(__file__).parent.joinpath("assets")
+        return str(tpath)

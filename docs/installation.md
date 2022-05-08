@@ -131,6 +131,10 @@ particularly for those upgrading:
   Specifies the path to Moonraker's config file. The default location
   is `/home/<user>/moonraker.conf`.  When using this option to modify
   an existing installation it is necessary to add `-f` as well.
+- `-z`:
+  Disables `systemctl` commands during install (ie: daemon-reload, restart).
+  This is useful for installations that occur outside of a standard environment
+  where systemd is not running.
 
 When the script completes it should start both Moonraker and Klipper. In
 `/tmp/klippy.log` you should find the following entry:
@@ -275,6 +279,43 @@ Retrieve the API Key via the browser from a trusted client:
   The API Key without the quotes.
 
         {"result": "8ce6ae5d354a4365812b83140ed62e4b"}
+
+### Recovering a broken repo
+
+Currently Moonraker is deployed using `git`.  Without going into the gritty
+details,`git` is effectively a file system, and as such is subject to
+file system corruption in the event of a loss of power, bad sdcard, etc.
+If this occurs, updates using the `[update_manager]` may fail.  In most
+cases Moonraker provides an automated method to recover, however in some
+edge cases this is not possible and the user will need to do so manually.
+This requires that you `ssh` into your machine.  The example below assumes
+the following:
+
+- You are using a Raspberry Pi
+- Moonraker and Klipper are installed at the default locations in the `home`
+  directory
+- Both Moonraker and Klipper have been corrupted and need to be restored
+
+The following commands may be used to restore Moonraker:
+
+```shell
+cd ~
+rm -rf moonraker
+git clone https://github.com/Arksine/moonraker.git
+cd moonraker/scripts
+./install-moonraker.sh
+./set-policykit-rules.sh
+sudo systemctl restart moonraker
+```
+
+And for Klipper:
+
+```shell
+cd ~
+rm -rf klipper
+git clone https://github.com/Klipper3d/klipper.git
+sudo systemctl restart klipper
+```
 
 ### Additional Notes
 
