@@ -1900,10 +1900,17 @@ Content-Type: application/json
 
 {
     "username": "my_user",
-    "password": "my_password"
+    "password": "my_password",
+    "source": "moonraker"
 }
 ```
 JSON-RPC request: Not Available
+
+Arguments:
+- `username`: The user login name.  This argument is required.
+- `password`: The user password. This arugment is required.
+- `source`:  The authentication source.  Can be `moonraker` or `ldap`. The
+  default is `moonraker`.
 
 Returns: An object the logged in username, auth token, refresh token,
 and action summary:
@@ -1912,7 +1919,8 @@ and action summary:
     "username": "my_user",
     "token": "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiTW9vbnJha2VyIiwgImlhdCI6IDE2MTg4NzY4MDAuNDgxNjU1LCAiZXhwIjogMTYxODg4MDQwMC40ODE2NTUsICJ1c2VybmFtZSI6ICJteV91c2VyIiwgInRva2VuX3R5cGUiOiAiYXV0aCJ9.QdieeEskrU0FrH7rXKuPDSZxscM54kV_vH60uJqdU9g",
     "refresh_token": "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiTW9vbnJha2VyIiwgImlhdCI6IDE2MTg4NzY4MDAuNDgxNzUxNCwgImV4cCI6IDE2MjY2NTI4MDAuNDgxNzUxNCwgInVzZXJuYW1lIjogIm15X3VzZXIiLCAidG9rZW5fdHlwZSI6ICJyZWZyZXNoIn0.btJF0LJfymInhGJQ2xvPwkp2dFUqwgcw4OA_wE-EcCM",
-    "action": "user_logged_in"
+    "action": "user_logged_in",
+    "source": "moonraker"
 }
 ```
 - The `token` field is a JSON Web Token used to authorize the user.  It should
@@ -1924,7 +1932,7 @@ and action summary:
 
 !!! Note
     This endpoint may be accessed by unauthorized clients.  A 401 would
-    only be returned if the username and/or password is invalid.
+    only be returned if the authentication failed.
 
 #### Logout Current User
 HTTP Request:
@@ -1949,11 +1957,12 @@ GET /access/user
 ```
 JSON-RPC request: Not Available
 
-Returns: An object containing the currently logged in user name and
+Returns: An object containing the currently logged in user name, the source and
 the date on which the user was created (in unix time).
 ```json
 {
     "username": "my_user",
+    "source": "moonraker",
     "created_on": 1618876783.8896716
 }
 ```
@@ -1972,13 +1981,15 @@ Content-Type: application/json
 JSON-RPC request: Not Available
 
 Returns: An object containing the created user name, an auth token,
-a refresh token, and an action summary.  Creating a user also effectively
-logs the user in.
+a refresh token, the source, and an action summary.  Creating a user also
+effectively logs the user in.
+
 ```json
 {
     "username": "my_user",
     "token": "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiTW9vbnJha2VyIiwgImlhdCI6IDE2MTg4NzY3ODMuODkxNjE5LCAiZXhwIjogMTYxODg4MDM4My44OTE2MTksICJ1c2VybmFtZSI6ICJteV91c2VyIiwgInRva2VuX3R5cGUiOiAiYXV0aCJ9.oH0IShTL7mdlVs4kcx3BIs_-1j0Oe-qXezJKjo-9Xgo",
     "refresh_token": "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiTW9vbnJha2VyIiwgImlhdCI6IDE2MTg4NzY3ODMuODkxNzAyNCwgImV4cCI6IDE2MjY2NTI3ODMuODkxNzAyNCwgInVzZXJuYW1lIjogIm15X3VzZXIiLCAidG9rZW5fdHlwZSI6ICJyZWZyZXNoIn0.a6ZeRjk8RQQJDDH0JV-qGY_d_HIgfI3XpsqUlUaFT7c",
+    "source": "moonraker",
     "action": "user_created"
 }
 ```
@@ -2028,10 +2039,12 @@ Returns: A list of created users on the system
     "users": [
         {
             "username": "testuser",
+            "source": "moonraker",
             "created_on": 1618771331.1685035
         },
         {
             "username": "testuser2",
+            "source": "ldap",
             "created_on": 1620943153.0191233
         }
     ]
@@ -2076,11 +2089,12 @@ Content-Type: application/json
 
 JSON-RPC request: Not Available
 
-Returns:  The username, new auth token, and action summary.
+Returns:  The username, new auth token, the source and action summary.
 ```json
 {
     "username": "my_user",
     "token": "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiTW9vbnJha2VyIiwgImlhdCI6IDE2MTg4NzgyNDMuNTE2Nzc5MiwgImV4cCI6IDE2MTg4ODE4NDMuNTE2Nzc5MiwgInVzZXJuYW1lIjogInRlc3R1c2VyIiwgInRva2VuX3R5cGUiOiAiYXV0aCJ9.Ia_X_pf20RR4RAEXcxalZIOzOBOs2OwearWHfRnTSGU",
+    "source": "moonraker",
     "action": "user_jwt_refresh"
 }
 ```
@@ -2109,6 +2123,25 @@ A temporary token that may be added to a request's query string for access
 to any API endpoint.  The query string should be added in the form of:
 ```
 ?token={base32_random_token}
+```
+
+#### Retrieve information about authorization endpoints
+HTTP Request:
+```http
+GET /access/info
+```
+JSON-RPC request: Not Available
+
+Returns: An object containing information about authorization endpoints, such as
+default_source and available_sources.
+```json
+{
+    "default_source": "moonraker",
+    "available_sources": [
+        "moonraker",
+        "ldap"
+    ]
+}
 ```
 
 #### Get the Current API Key
@@ -2846,6 +2879,34 @@ The `entry_id` of the dismissed entry:
 }
 ```
 
+#### List announcement feeds
+
+HTTP request:
+```http
+GET /server/announcements/feeds
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "server.announcements.feeds",
+    "id": 4654
+}
+```
+
+Returns:
+
+A list of feeds the instance of Moonraker is subscribed to.
+
+```json
+{
+    "feeds": [
+        "moonraker",
+        "klipper"
+    ]
+}
+```
+
 #### Add an announcement feed
 Specifies a new feed for Moonraker's `announcements` component to query
 in addition to `moonraker`, `klipper`, and feeds configured in
@@ -3466,7 +3527,7 @@ JSON-RPC request:
     "jsonrpc": "2.0",
     "method": "machine.device_power.off",
     "params": {
-        "dev_one":null,
+        "dev_one": null,
         "dev_two": null
     },
     "id": 4564
@@ -3477,6 +3538,340 @@ An object containing power state for each requested device:
 {
     "green_led": "off",
     "printer": "off"
+}
+```
+### WLED APIs
+The APIs for WLED are available when the `[wled]` component has been configured. For lower-level control of wled consider using the WLED [JOSN API](https://kno.wled.ge/interfaces/json-api/) directly.
+
+#### Get strips
+HTTP request:
+```http
+GET /machine/wled/strips
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method":"machine.wled.strips",
+    "id": 7123
+}
+```
+Returns:
+
+Strip information for all wled strips.
+```json
+{
+    "result": {
+        "strips": {
+            "lights": {
+                "strip": "lights",
+                "status": "on",
+                "chain_count": 79,
+                "preset": -1,
+                "brightness": 255,
+                "intensity": -1,
+                "speed": -1,
+                "error": null
+            },
+            "desk": {
+                "strip": "desk",
+                "status": "on",
+                "chain_count": 60,
+                "preset": 8,
+                "brightness": -1,
+                "intensity": -1,
+                "speed": -1,
+                "error": null
+            }
+        }
+    }
+}
+```
+
+#### Get strip status
+HTTP request:
+```http
+GET /machine/wled/status?strip1&strip2
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method":"machine.wled.status",
+    "params": {
+        "lights": null,
+        "desk": null
+    },
+    "id": 7124
+}
+```
+Returns:
+
+Strip information for requested strips.
+```json
+{
+    "result": {
+        "lights": {
+            "strip": "lights",
+            "status": "on",
+            "chain_count": 79,
+            "preset": -1,
+            "brightness": 255,
+            "intensity": -1,
+            "speed": -1,
+            "error": null
+        },
+        "desk": {
+            "strip": "desk",
+            "status": "on",
+            "chain_count": 60,
+            "preset": 8,
+            "brightness": -1,
+            "intensity": -1,
+            "speed": -1,
+            "error": null
+        }
+    }
+}
+```
+
+#### Turn strip on
+Turns the specified strips on to the initial colors or intial preset.
+
+HTTP request:
+```http
+POST /machine/wled/on?strip1&strip2
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method":"machine.wled.on",
+    "params": {
+        "lights": null,
+        "desk": null
+    },
+    "id": 7125
+}
+```
+Returns:
+
+Strip information for requested strips.
+```json
+{
+    "result": {
+        "lights": {
+            "strip": "lights",
+            "status": "on",
+            "chain_count": 79,
+            "preset": -1,
+            "brightness": 255,
+            "intensity": -1,
+            "speed": -1,
+            "error": null
+        },
+        "desk": {
+            "strip": "desk",
+            "status": "on",
+            "chain_count": 60,
+            "preset": 8,
+            "brightness": -1,
+            "intensity": -1,
+            "speed": -1,
+            "error": null
+        }
+    }
+}
+```
+
+#### Turn strip off
+Turns off all specified strips.
+
+HTTP request:
+```http
+POST /machine/wled/off?strip1&strip2
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method":"machine.wled.off",
+    "params": {
+        "lights": null,
+        "desk": null
+    },
+    "id": 7126
+}
+```
+Returns:
+
+The new state of the specified strips.
+```json
+{
+    "result": {
+        "lights": {
+            "strip": "lights",
+            "status": "off",
+            "chain_count": 79,
+            "preset": -1,
+            "brightness": 255,
+            "intensity": -1,
+            "speed": -1,
+            "error": null
+        },
+        "desk": {
+            "strip": "desk",
+            "status": "off",
+            "chain_count": 60,
+            "preset": 8,
+            "brightness": -1,
+            "intensity": -1,
+            "speed": -1,
+            "error": null
+        }
+    }
+}
+```
+
+#### Toggle strip on/off state
+Turns each strip off if it is on and on if it is off.
+
+HTTP request:
+```http
+POST /machine/wled/off?strip1&strip2
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method":"machine.wled.toggle",
+    "params": {
+        "lights": null,
+        "desk": null
+    },
+    "id": 7127
+}
+```
+Returns:
+
+The new state of the specified strips.
+```json
+{
+    "result": {
+        "lights": {
+            "strip": "lights",
+            "status": "on",
+            "chain_count": 79,
+            "preset": -1,
+            "brightness": 255,
+            "intensity": -1,
+            "speed": -1,
+            "error": null
+        },
+        "desk": {
+            "strip": "desk",
+            "status": "off",
+            "chain_count": 60,
+            "preset": 8,
+            "brightness": -1,
+            "intensity": -1,
+            "speed": -1,
+            "error": null
+        }
+    }
+}
+```
+
+#### Control individual strip state
+Toggle, turn on, turn off, turn on with preset, turn on with brightness, or
+turn on preset will some of brightness, intensity, and speed. Or simply set
+some of brightness, intensity, and speed.
+
+HTTP requests:
+
+Turn strip `lights` off
+```http
+POST /machine/wled/strip?strip=lights&action=off
+```
+
+Turn strip `lights` on to the initial colors or intial preset.
+```http
+POST /machine/wled/strip?strip=lights&action=on
+```
+
+Turn strip `lights` on activating preset 3.
+```http
+POST /machine/wled/strip?strip=lights&action=on&preset=3
+```
+
+Turn strip `lights` on activating preset 3 while specifying speed and
+intensity.
+```http
+POST /machine/wled/strip?strip=lights&action=on&preset=3&intensity=50&speed=255
+```
+
+Change strip `lights` brightness (if on) and speed (if a preset is active).
+```http
+POST /machine/wled/strip?strip=lights&action=control&brightness=99&speed=50
+```
+
+JSON-RPC request:
+
+Returns information for the specified strip.
+```json
+{
+    "jsonrpc": "2.0",
+    "method":"machine.wled.get_strip",
+    "params": {
+        "strip": "lights",
+    },
+    "id": 7128
+}
+```
+
+Calls the action with the arguments for the specified strip.
+```json
+{
+    "jsonrpc": "2.0",
+    "method":"machine.wled.post_strip",
+    "params": {
+        "strip": "lights",
+        "action": "on",
+        "preset": 1,
+        "brightness": 255,
+        "intensity": 255,
+        "speed": 255
+    },
+    "id": 7129
+}
+```
+!!! note
+    The `action` argument may be `on`, `off`, `toggle` or `control`. Any
+    other value will result in an error.
+
+The `intensity` and `speed` arguments are only used if a preset is active.
+Permitted ranges are 1-255 for `brightness` and 0-255 for `intensity` and
+`speed`. When action is `on` a `preset` with some or all of `brightness`,
+`intensity` and `speed` may also be specified. If the action `control` is used
+one or all of `brightness`, `intensity`, and `speed` must be specified.
+
+Returns:
+
+State of the strip.
+```json
+{
+    "result": {
+        "lights": {
+            "strip": "lights",
+            "status": "on",
+            "chain_count": 79,
+            "preset": 1,
+            "brightness": 50,
+            "intensity": 255,
+            "speed": 255,
+            "error": null
+        }
+    }
 }
 ```
 

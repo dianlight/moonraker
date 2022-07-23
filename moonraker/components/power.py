@@ -11,7 +11,6 @@ import struct
 import socket
 import asyncio
 import time
-from tornado.escape import json_decode
 
 # Annotation imports
 from typing import (
@@ -55,7 +54,8 @@ class PrinterPower:
             "loxonev1": Loxonev1,
             "rf": RFDevice,
             "mqtt": MQTTDevice,
-            "smartthings": SmartThings
+            "smartthings": SmartThings,
+            "hue": HueDevice
         }
 
         for section in prefix_sections:
@@ -104,30 +104,11 @@ class PrinterPower:
         return pstate == "printing"
 
     async def component_init(self) -> None:
-        event_loop = self.server.get_event_loop()
-        # Wait up to 5 seconds for the machine component to init
-        machine_cmp: Machine = self.server.lookup_component("machine")
-        await machine_cmp.wait_for_init(5.)
-        cur_time = event_loop.get_loop_time()
-        endtime = cur_time + 120.
-        query_devs = list(self.devices.values())
-        failed_devs: List[PowerDevice] = []
-        while cur_time < endtime:
-            for dev in query_devs:
-                if not await dev.initialize():
-                    failed_devs.append(dev)
-            if not failed_devs:
-                logging.debug("All power devices initialized")
-                return
-            query_devs = failed_devs
-            failed_devs = []
-            await asyncio.sleep(2.)
-            cur_time = event_loop.get_loop_time()
-        if failed_devs:
-            failed_names = [d.get_name() for d in failed_devs]
-            self.server.add_warning(
-                "The following power devices failed init:"
-                f" {failed_names}")
+        for dev in self.devices.values():
+            if not dev.initialize():
+                self.server.add_warning(
+                    f"Power device '{dev.get_name()}' failed to initialize"
+                )
 
     def _handle_klippy_shutdown(self) -> None:
         for dev in self.devices.values():
@@ -211,9 +192,13 @@ class PrinterPower:
         if name in self.devices:
             raise self.server.error(
                 f"Device [{name}] already configured")
-        if not await device.initialize():
+        success = device.initialize()
+        if asyncio.iscoroutine(success):
+            success = await success  # type: ignore
+        if not success:
             self.server.add_warning(
-                f"Failed to initialize power device: {device.get_name()}")
+                f"Power device '{device.get_name()}' failed to initialize"
+            )
             return
         self.devices[name] = device
 
@@ -234,6 +219,7 @@ class PowerDevice:
         self.type: str = config.get('type')
         self.state: str = "init"
         self.request_lock = asyncio.Lock()
+        self.init_task: Optional[asyncio.Task] = None
         self.locked_while_printing = config.getboolean(
             'locked_while_printing', False)
         self.off_when_shutdown = config.getboolean('off_when_shutdown', False)
@@ -353,11 +339,12 @@ class PowerDevice:
     def init_state(self) -> Optional[Coroutine]:
         return None
 
-    async def initialize(self) -> bool:
+    def initialize(self) -> bool:
         self._setup_bound_service()
         ret = self.init_state()
         if ret is not None:
-            await ret
+            eventloop = self.server.get_event_loop()
+            self.init_task = eventloop.create_task(ret)
         return self.state != "error"
 
     async def process_request(self, req: str) -> str:
@@ -403,7 +390,10 @@ class PowerDevice:
         raise NotImplementedError
 
     def close(self) -> Optional[Coroutine]:
-        pass
+        if self.init_task is not None:
+            self.init_task.cancel()
+            self.init_task = None
+        return None
 
 
 class HTTPDevice(PowerDevice):
@@ -425,7 +415,23 @@ class HTTPDevice(PowerDevice):
 
     async def init_state(self) -> None:
         async with self.request_lock:
-            await self.refresh_status()
+            last_err: Exception = Exception()
+            while True:
+                try:
+                    state = await self._send_status_request()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    if type(last_err) != type(e) or last_err.args != e.args:
+                        logging.info(f"Device Init Error: {self.name}\n{e}")
+                        last_err = e
+                    await asyncio.sleep(5.)
+                    continue
+                else:
+                    self.init_task = None
+                    self.state = state
+                    self.notify_power_changed()
+                    return
 
     async def _send_http_command(self,
                                  url: str,
@@ -861,21 +867,39 @@ class TPLinkSmartPlug(PowerDevice):
             res += chr(val)
         return res
 
+    async def _send_info_request(self) -> int:
+        res = await self._send_tplink_command("info")
+        if self.output_id is not None:
+            # TPLink device controls multiple devices
+            children: Dict[int, Any]
+            children = res['system']['get_sysinfo']['children']
+            return children[self.output_id]['state']
+        else:
+            return res['system']['get_sysinfo']['relay_state']
+
     async def init_state(self) -> None:
         async with self.request_lock:
-            await self.refresh_status()
+            last_err: Exception = Exception()
+            while True:
+                try:
+                    state: int = await self._send_info_request()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    if type(last_err) != type(e) or last_err.args != e.args:
+                        logging.info(f"Device Init Error: {self.name}\n{e}")
+                        last_err = e
+                    await asyncio.sleep(5.)
+                    continue
+                else:
+                    self.init_task = None
+                    self.state = "on" if state else "off"
+                    self.notify_power_changed()
+                    return
 
     async def refresh_status(self) -> None:
         try:
-            state: str
-            res = await self._send_tplink_command("info")
-            if self.output_id is not None:
-                # TPLink device controls multiple devices
-                children: Dict[int, Any]
-                children = res['system']['get_sysinfo']['children']
-                state = children[self.output_id]['state']
-            else:
-                state = res['system']['get_sysinfo']['relay_state']
+            state: int = await self._send_info_request()
         except Exception:
             self.state = "error"
             msg = f"Error Refeshing Device Status: {self.name}"
@@ -1311,6 +1335,35 @@ class MQTTDevice(PowerDevice):
             raise self.server.error(
                 f"MQTT Power Device {self.name}: Failed to set "
                 f"device to state '{state}'", 500)
+
+
+class HueDevice(HTTPDevice):
+
+    def __init__(self, config: ConfigHelper) -> None:
+        super().__init__(config)
+        self.device_id = config.get("device_id")
+
+    async def _send_power_request(self, state: str) -> str:
+        new_state = True if state == "on" else False
+        url = (
+            f"http://{self.addr}/api/{self.user}/lights/{self.device_id}/state"
+        )
+        url = self.client.escape_url(url)
+        ret = await self.client.request("PUT", url, body={"on": new_state})
+        resp = cast(List[Dict[str, Dict[str, Any]]], ret.json())
+        return (
+            "on" if resp[0]["success"][f"/lights/{self.device_id}/state/on"]
+            else "off"
+        )
+
+    async def _send_status_request(self) -> str:
+        url = (
+            f"http://{self.addr}/api/{self.user}/lights/{self.device_id}"
+        )
+        url = self.client.escape_url(url)
+        ret = await self.client.request("GET", url)
+        resp = cast(Dict[str, Dict[str, Any]], ret.json())
+        return "on" if resp["state"]["on"] else "off"
 
 
 # The power component has multiple configuration sections

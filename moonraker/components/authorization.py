@@ -32,13 +32,14 @@ from typing import (
     Dict,
     List,
 )
+
 if TYPE_CHECKING:
     from confighelper import ConfigHelper
     from websockets import WebRequest
     from tornado.httputil import HTTPServerRequest
     from tornado.web import RequestHandler
-    from . import database
-    DBComp = database.MoonrakerDatabase
+    from .database import MoonrakerDatabase as DBComp
+    from .ldap import MoonrakerLDAP
     IPAddr = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
     IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
     OneshotToken = Tuple[IPAddr, Optional[Dict[str, Any]], asyncio.Handle]
@@ -58,6 +59,7 @@ ONESHOT_TIMEOUT = 5
 TRUSTED_CONNECTION_TIMEOUT = 3600
 PRUNE_CHECK_TIME = 300.
 
+AUTH_SOURCES = ["moonraker", "ldap"]
 HASH_ITER = 100000
 API_USER = "_API_KEY_USER_"
 TRUSTED_USER = "_TRUSTED_USER_"
@@ -73,6 +75,20 @@ class Authorization:
         self.server = config.get_server()
         self.login_timeout = config.getint('login_timeout', 90)
         self.force_logins = config.getboolean('force_logins', False)
+        self.default_source = config.get('default_source', "moonraker").lower()
+        if self.default_source not in AUTH_SOURCES:
+            raise config.error(
+                "[authorization]: option 'default_source' - Invalid "
+                f"value '{self.default_source}'"
+            )
+        self.ldap: Optional[MoonrakerLDAP] = None
+        if config.has_section("ldap"):
+            self.ldap = self.server.load_component(config, "ldap", None)
+        if self.default_source == "ldap" and self.ldap is None:
+            self.server.add_warning(
+                "[authorization]: Option 'default_source' set to 'ldap',"
+                " however [ldap] section failed to load or not configured"
+            )
         database: DBComp = self.server.lookup_component('database')
         database.register_local_namespace('authorized_users', forbidden=True)
         self.user_db = database.wrap_namespace('authorized_users')
@@ -165,7 +181,7 @@ class Authorization:
                 continue
             # Check ip network
             try:
-                tc = ipaddress.ip_network(val)
+                tn = ipaddress.ip_network(val)
             except ValueError as e:
                 if "has host bits set" in str(e):
                     self.server.add_warning(
@@ -174,7 +190,7 @@ class Authorization:
                     continue
                 pass
             else:
-                self.trusted_ranges.append(tc)
+                self.trusted_ranges.append(tn)
                 continue
             # Check hostname
             match = re.match(r"([a-z0-9]+(-[a-z0-9]+)*\.?)+[a-z]{2,}$", val)
@@ -204,6 +220,7 @@ class Authorization:
         self.permitted_paths.add("/server/redirect")
         self.permitted_paths.add("/access/login")
         self.permitted_paths.add("/access/refresh_jwt")
+        self.permitted_paths.add("/access/info")
         self.server.register_endpoint(
             "/access/login", ['POST'], self._handle_login,
             transports=['http'])
@@ -228,6 +245,9 @@ class Authorization:
         self.server.register_endpoint(
             "/access/oneshot_token", ['GET'],
             self._handle_oneshot_request, transports=['http'])
+        self.server.register_endpoint(
+            "/access/info", ['GET'],
+            self._handle_info_request, transports=['http'])
         self.server.register_notification("authorization:user_created")
         self.server.register_notification("authorization:user_deleted")
 
@@ -252,7 +272,7 @@ class Authorization:
         return self.get_oneshot_token(ip, user_info)
 
     async def _handle_login(self, web_request: WebRequest) -> Dict[str, Any]:
-        return self._login_jwt_user(web_request)
+        return await self._login_jwt_user(web_request)
 
     async def _handle_logout(self, web_request: WebRequest) -> Dict[str, str]:
         user_info = web_request.get_current_user()
@@ -269,6 +289,17 @@ class Authorization:
         return {
             "username": username,
             "action": "user_logged_out"
+        }
+
+    async def _handle_info_request(
+        self, web_request: WebRequest
+    ) -> Dict[str, Any]:
+        sources = ["moonraker"]
+        if self.ldap is not None:
+            sources.append("ldap")
+        return {
+            "default_source": self.default_source,
+            "available_sources": sources
         }
 
     async def _handle_refresh_jwt(self,
@@ -288,6 +319,7 @@ class Authorization:
         return {
             'username': username,
             'token': token,
+            'source': user_info.get("source", "moonraker"),
             'action': 'user_jwt_refresh'
         }
 
@@ -300,16 +332,18 @@ class Authorization:
             if user is None:
                 return {
                     'username': None,
+                    'source': None,
                     'created_on': None,
                 }
             else:
                 return {
                     'username': user['username'],
+                    'source': user.get("source", "moonraker"),
                     'created_on': user.get('created_on')
                 }
         elif action == "POST":
             # Create User
-            return self._login_jwt_user(web_request, create=True)
+            return await self._login_jwt_user(web_request, create=True)
         elif action == "DELETE":
             # Delete User
             return self._delete_jwt_user(web_request)
@@ -324,6 +358,7 @@ class Authorization:
                 continue
             user_list.append({
                 'username': user['username'],
+                'source': user.get("source", "moonraker"),
                 'created_on': user['created_on']
             })
         return {
@@ -339,6 +374,9 @@ class Authorization:
         if user_info is None:
             raise self.server.error("No Current User")
         username = user_info['username']
+        if user_info.get("source", "moonraker") == "ldap":
+            raise self.server.error(
+                f"Can´t Reset password for ldap user {username}")
         if username in RESERVED_USERS:
             raise self.server.error(
                 f"Invalid Reset Request for user {username}")
@@ -356,16 +394,30 @@ class Authorization:
             'action': "user_password_reset"
         }
 
-    def _login_jwt_user(self,
-                        web_request: WebRequest,
-                        create: bool = False
-                        ) -> Dict[str, Any]:
+    async def _login_jwt_user(
+        self, web_request: WebRequest, create: bool = False
+    ) -> Dict[str, Any]:
         username: str = web_request.get_str('username')
         password: str = web_request.get_str('password')
+        source: str = web_request.get_str(
+            'source', self.default_source
+        ).lower()
+        if source not in AUTH_SOURCES:
+            raise self.server.error(f"Invalid 'source': {source}")
         user_info: Dict[str, Any]
         if username in RESERVED_USERS:
             raise self.server.error(
                 f"Invalid Request for user {username}")
+        if source == "ldap":
+            if create:
+                raise self.server.error("Cannot Create LDAP User")
+            if self.ldap is None:
+                raise self.server.error(
+                    "LDAP authentication not available", 401
+                )
+            await self.ldap.authenticate_ldap_user(username, password)
+            if username not in self.users:
+                create = True
         if create:
             if username in self.users:
                 raise self.server.error(f"User {username} already exists")
@@ -376,21 +428,32 @@ class Authorization:
                 'username': username,
                 'password': hashed_pass,
                 'salt': salt.hex(),
+                'source': source,
                 'created_on': time.time()
             }
             self.users[username] = user_info
             self._sync_user(username)
             action = "user_created"
+            if source == "ldap":
+                # Dont notify user created
+                action = "user_logged_in"
+                create = False
         else:
             if username not in self.users:
                 raise self.server.error(f"Unregistered User: {username}")
             user_info = self.users[username]
+            auth_src = user_info.get("source", "moonraker")
+            if auth_src != source:
+                raise self.server.error(
+                    f"Moonraker cannot authenticate user '{username}', must "
+                    f"specify source '{auth_src}'", 401
+                )
             salt = bytes.fromhex(user_info['salt'])
             hashed_pass = hashlib.pbkdf2_hmac(
                 'sha256', password.encode(), salt, HASH_ITER).hex()
             action = "user_logged_in"
-        if hashed_pass != user_info['password']:
-            raise self.server.error("Invalid Password")
+            if hashed_pass != user_info['password']:
+                raise self.server.error("Invalid Password")
         jwt_secret_hex: Optional[str] = user_info.get('jwt_secret', None)
         if jwt_secret_hex is None:
             private_key = Signer()
@@ -416,6 +479,7 @@ class Authorization:
         return {
             'username': username,
             'token': token,
+            'source': user_info.get("source", "moonraker"),
             'refresh_token': refresh_token,
             'action': action
         }
@@ -625,7 +689,7 @@ class Authorization:
 
     def _check_oneshot_token(self,
                              token: str,
-                             cur_ip: IPAddr
+                             cur_ip: Optional[IPAddr]
                              ) -> Optional[Dict[str, Any]]:
         if token in self.oneshot_tokens:
             ip_addr, user, hdl = self.oneshot_tokens.pop(token)
@@ -641,8 +705,10 @@ class Authorization:
     def check_authorized(self,
                          request: HTTPServerRequest
                          ) -> Optional[Dict[str, Any]]:
-        if request.path in self.permitted_paths or \
-                request.method == "OPTIONS":
+        if (
+            request.path in self.permitted_paths
+            or request.method == "OPTIONS"
+        ):
             return None
 
         # Check JSON Web Token
@@ -651,7 +717,7 @@ class Authorization:
             return jwt_user
 
         try:
-            ip = ipaddress.ip_address(request.remote_ip)
+            ip = ipaddress.ip_address(request.remote_ip)  # type: ignore
         except ValueError:
             logging.exception(
                 f"Unable to Create IP Address {request.remote_ip}")
@@ -733,6 +799,11 @@ class Authorization:
                 "Origin, Accept, Content-Type, X-Requested-With, "
                 "X-CRSF-Token, Authorization, X-Access-Token, "
                 "X-Api-Key")
+            if req_hdlr.request.headers.get(
+                    "Access-Control-Request-Private-Network", None) == "true":
+                req_hdlr.set_header(
+                    "Access-Control-Allow-Private-Network",
+                    "true")
 
     def cors_enabled(self) -> bool:
         return self.cors_domains is not None

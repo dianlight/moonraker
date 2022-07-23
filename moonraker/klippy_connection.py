@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 INIT_TIME = .25
 LOG_ATTEMPT_INTERVAL = int(2. / INIT_TIME + .5)
 MAX_LOG_ATTEMPTS = 10 * LOG_ATTEMPT_INTERVAL
-UNIX_BUFFER_LIMIT = 2 * 1024 * 1024
+UNIX_BUFFER_LIMIT = 20 * 1024 * 1024
 
 class KlippyConnection:
     def __init__(self, config: confighelper.ConfigHelper) -> None:
@@ -233,13 +233,16 @@ class KlippyConnection:
                 "Unable to get Unix Socket, cant fetch peer credentials"
             )
             return
+        data: bytes = b""
         try:
             data = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             pid, uid, gid = struct.unpack("@LLL", data)
         except asyncio.CancelledError:
             raise
         except Exception:
-            logging.exception("Failed to get Klippy Credentials")
+            logging.exception(
+                f"Failed to get Klippy Peer Credentials, raw: 0x{data.hex()}"
+            )
             return
         self._peer_cred = {
             "process_id": pid,
@@ -288,7 +291,7 @@ class KlippyConnection:
                     self.init_list.append("gcode_output_sub")
             if "startup_complete" not in self.init_list:
                 await self._check_ready()
-            if len(self.init_list) == 4:
+            if len(self.init_list) == 5:
                 logging.debug("Klippy Connection Initialized")
                 return True
             elif not self.is_connected():
@@ -326,13 +329,16 @@ class KlippyConnection:
             msg = f"Klipper Version: {version}"
             self.server.add_log_rollover_item("klipper_version", msg)
         self._klippy_info = dict(result)
-        self._state = result.get('state', "unknown")
+        state = result.get('state', "unknown")
+        if state != "startup" and "endpoints_requested" not in self.init_list:
+            await self._request_endpoints()
+            self.init_list.append("endpoints_requested")
+        self._state = state
         if send_id:
             self.init_list.append("identified")
             await self.server.send_event("server:klippy_identified")
         if self._state != "startup":
             self.init_list.append('startup_complete')
-            await self._request_endpoints()
             await self.server.send_event("server:klippy_started",
                                          self._state)
             if self._state != "ready":

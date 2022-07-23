@@ -285,6 +285,46 @@ force_logins: False
 #   one user has been created, overriding the "trusted_clients" configuration.
 #   If no users have been created then trusted client checks will apply.
 #   The default is False.
+default_source: moonraker
+#   The default source used to authenticate user logins. Can be "ldap" or
+#   "moonraker"  The default is "moonraker".
+```
+
+### `[ldap]`
+
+The `ldap` module may be used by `[authorization]` to perform user
+authentication though an ldap server.
+
+```ini
+# moonraker.conf
+
+[ldap]
+ldap_host: ldap.local
+#   The host address of the LDAP server.  This parameter must be provided
+ldap_port:
+#   The LDAP server's port.  The default is 389 for standard connections
+#   and 636 for SSL/TLS connections.
+ldap_secure: True
+#   Enables LDAP over SSL/TLS. The default is False.
+base_dn: DC=ldap,DC=local
+#   The base distinguished name used to search for users on the server.
+#   This option accepts Jinja2 Templates, see the [secrets] section for details.
+#   This parameter must be provided.
+bind_dn: {secrets.ldap_credentials.bind_dn}
+#   The distinguished name for bind authentication.  For example:
+#       CN=moonraker,OU=Users,DC=ldap,DC=local
+#   This option accepts Jinja2 Templates, see the [secrets] section for
+#   details.  By default the ldap client will attempt to bind anonymously.
+bind_password: {secrets.ldap_credentials.bind_password}
+#   The password for bind authentication. This option accepts Jinja2 Templates,
+#   see the [secrets] section for details.  This parameter must be provided
+#   if a "bind_dn" is specified, otherwise it must be omitted.
+group_dn: CN=moonraker,OU=Groups,DC=ldap,DC=local
+#   A group distinguished name in which the user must be a member of to pass
+#   authentication.  This option accepts Jinja2 Templates, see the [secrets]
+#   section for details. The default is no group requirement.
+is_active_directory: True
+#   Enables support for Microsoft Active Directory.  The default is False.
 ```
 
 ### `[octoprint_compat]`
@@ -406,7 +446,7 @@ The following configuration options are available for all power device types:
 type:
 #   The type of device.  Can be either gpio, gcode, klipper_device, rf,
 #   tplink_smartplug, tasmota, shelly, homeseer, homeassistant, loxonev1,
-#   smartthings, or mqtt.
+#   smartthings, mqtt or hue.
 #   This parameter must be provided.
 off_when_shutdown: False
 #   If set to True the device will be powered off when Klipper enters
@@ -1018,6 +1058,28 @@ token: smartthings-bearer-token
 device: smartthings-device-id
 ```
 
+#### Hue Device Configuration
+
+The following options are available for `hue` device types:
+
+```ini
+# moonraker.conf
+
+address:
+#   A valid ip address or hostname of the Philips Hue Bridge. This
+#   parameter must be provided.
+user:
+#   The api key used for request authorization.  This option accepts
+#   Jinja2 Templates, see the [secrets] section for details.
+#   An explanation how to get the api key can be found here:
+#   https://developers.meethue.com/develop/get-started-2/#so-lets-get-started
+device_id:
+#   The device id of the light/socket you want to control.
+#   An explanation on how you could get the device id, can be found here:
+#   https://developers.meethue.com/develop/get-started-2/#turning-a-light-on-and-off
+
+```
+
 #### Toggling device state from Klipper
 
 It is possible to toggle device power from the Klippy host, this can be done
@@ -1517,6 +1579,20 @@ gcode:
                              strip=strip,
                              state=True,
                              preset=preset)}
+
+[gcode_macro WLED_CONTROL]
+description: Control effect values and brightness
+gcode:
+  {% set strip = params.STRIP|default('lights')|string %}
+  {% set brightness = params.BRIGHTNESS|default(-1)|int %}
+  {% set intensity = params.INTENSITY|default(-1)|int %}
+  {% set speed = params.SPEED|default(-1)|int %}
+
+  {action_call_remote_method("set_wled_state",
+                             strip=strip,
+                             brightness=brightness,
+                             intensity=intensity,
+                             speed=speed)}
 
 [gcode_macro WLED_OFF]
 description: Turn WLED strip off

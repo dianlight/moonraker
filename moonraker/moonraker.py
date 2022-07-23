@@ -293,13 +293,17 @@ class Server:
                              ) -> None:
         events = self.events.get(event, [])
         coroutines: List[Coroutine] = []
-        for func in events:
-            ret = func(*args)
-            if ret is not None:
-                coroutines.append(ret)
-        if coroutines:
-            await asyncio.gather(*coroutines)
-        fut.set_result(None)
+        try:
+            for func in events:
+                ret = func(*args)
+                if ret is not None:
+                    coroutines.append(ret)
+            if coroutines:
+                await asyncio.gather(*coroutines)
+        except ServerError as e:
+            logging.exception(f"Error Processing Event: {fut}")
+        if not fut.done():
+            fut.set_result(None)
 
     def register_remote_method(self,
                                method_name: str,
@@ -369,6 +373,8 @@ class Server:
                 except Exception:
                     logging.exception(
                         f"Error executing 'close()' for component: {name}")
+        # Allow cancelled tasks a chance to run in the eventloop
+        await asyncio.sleep(.001)
 
         self.exit_reason = exit_reason
         self.event_loop.remove_signal_handler(signal.SIGTERM)
@@ -487,18 +493,6 @@ def main(cmd_line_args: argparse.Namespace) -> None:
         # it is ok to use a blocking sleep here
         time.sleep(.5)
         logging.info("Attempting Server Restart...")
-        for _ in range(5):
-            # Sometimes the new loop does not properly instantiate.
-            # Give 5 attempts before raising an exception
-            new_loop = asyncio.new_event_loop()
-            if not new_loop.is_closed():
-                break
-            logging.info("Failed to create open eventloop, "
-                         "retyring in .5 seconds...")
-            time.sleep(.5)
-        else:
-            raise RuntimeError("Unable to create new open eventloop")
-        asyncio.set_event_loop(new_loop)
         event_loop.reset()
     event_loop.close()
     logging.info("Server Shutdown")

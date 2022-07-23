@@ -8,12 +8,16 @@ from __future__ import annotations
 import asyncio
 import inspect
 import functools
+import socket
+import time
+import logging
 from typing import (
     TYPE_CHECKING,
     Awaitable,
     Callable,
     Coroutine,
     Optional,
+    Tuple,
     TypeVar,
     Union
 )
@@ -29,7 +33,7 @@ class EventLoop:
         self.reset()
 
     def reset(self) -> None:
-        self.aioloop = asyncio.get_event_loop()
+        self.aioloop = self._create_new_loop()
         self.add_signal_handler = self.aioloop.add_signal_handler
         self.remove_signal_handler = self.aioloop.remove_signal_handler
         self.add_reader = self.aioloop.add_reader
@@ -42,6 +46,21 @@ class EventLoop:
         self.call_at = self.aioloop.call_at
         self.set_debug = self.aioloop.set_debug
         self.is_running = self.aioloop.is_running
+
+    def _create_new_loop(self) -> asyncio.AbstractEventLoop:
+        for _ in range(5):
+            # Sometimes the new loop does not properly instantiate.
+            # Give 5 attempts before raising an exception
+            new_loop = asyncio.new_event_loop()
+            if not new_loop.is_closed():
+                break
+            logging.info("Failed to create open eventloop, "
+                         "retyring in .5 seconds...")
+            time.sleep(.5)
+        else:
+            raise RuntimeError("Unable to create new open eventloop")
+        asyncio.set_event_loop(new_loop)
+        return new_loop
 
     def register_callback(self,
                           callback: FlexCallback,
@@ -82,6 +101,45 @@ class EventLoop:
                       *args
                       ) -> Awaitable[_T]:
         return self.aioloop.run_in_executor(None, callback, *args)
+
+    async def create_socket_connection(
+        self, address: Tuple[str, int], timeout: Optional[float] = None
+    ) -> socket.socket:
+        host, port = address
+        """
+        async port of socket.create_connection()
+        """
+        loop = self.aioloop
+        err = None
+        ainfo = await loop.getaddrinfo(
+            host, port, family=0, type=socket.SOCK_STREAM
+        )
+        for res in ainfo:
+            af, socktype, proto, canonname, sa = res
+            sock = None
+            try:
+                sock = socket.socket(af, socktype, proto)
+                sock.settimeout(0)
+                sock.setblocking(False)
+                await asyncio.wait_for(
+                    loop.sock_connect(sock, (host, port)), timeout
+                )
+                # Break explicitly a reference cycle
+                err = None
+                return sock
+            except (socket.error, asyncio.TimeoutError) as _:
+                err = _
+                if sock is not None:
+                    loop.remove_writer(sock.fileno())
+                    sock.close()
+        if err is not None:
+            try:
+                raise err
+            finally:
+                # Break explicitly a reference cycle
+                err = None
+        else:
+            raise socket.error("getaddrinfo returns an empty list")
 
     def start(self):
         self.aioloop.run_forever()
